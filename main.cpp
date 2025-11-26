@@ -723,7 +723,7 @@ int main() {
     
     printf("Game ended\n");
     
-    // Cleanup
+	// Cleanup and exit
     closeAudio();
     delete controller;
     delete scene;
