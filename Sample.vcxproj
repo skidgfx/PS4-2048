@@ -79,6 +79,7 @@ del /s /q /f $(IntDir)\*.oelf</NMakeCleanCommandLine>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="controller.h" />
+    <ClInclude Include="dr_wav.h" />
     <ClInclude Include="graphics.h" />
     <ClInclude Include="log.h" />
   </ItemGroup>

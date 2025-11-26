@@ -175,3 +175,52 @@ bool Controller::TouchpadPressed()
 	return CheckButtonsPressed(ORBIS_PAD_BUTTON_TOUCH_PAD);
 }
 
+// Normalize analog stick value from 0-255 to -1.0 to 1.0
+float Controller::normalizeStickValue(uint8_t value)
+{
+    // Convert 0-255 range to -1.0 to 1.0
+    return (value - 128) / 128.0f;
+}
+
+float Controller::GetLeftStickX()
+{
+    scePadReadState(this->pad, &this->padData);
+    return normalizeStickValue(this->padData.leftStick.x);
+}
+
+float Controller::GetLeftStickY()
+{
+    scePadReadState(this->pad, &this->padData);
+    return normalizeStickValue(this->padData.leftStick.y);
+}
+
+float Controller::GetRightStickX()
+{
+    scePadReadState(this->pad, &this->padData);
+    return normalizeStickValue(this->padData.rightStick.x);
+}
+
+float Controller::GetRightStickY()
+{
+    scePadReadState(this->pad, &this->padData);
+    return normalizeStickValue(this->padData.rightStick.y);
+}
+
+int Controller::GetTouchpadX()
+{
+    // Touchpad data not easily accessible in current SDK version
+    return -1;
+}
+
+int Controller::GetTouchpadY()
+{
+    // Touchpad data not easily accessible in current SDK version
+    return -1;
+}
+
+bool Controller::IsTouchpadTouched()
+{
+    // Touchpad data not easily accessible in current SDK version
+    return false;
+}
+

@@ -4,10 +4,16 @@
 #include <time.h>
 #include <sstream>
 #include <pthread.h>
+#include <cmath>
 #include <orbis/AudioOut.h>
 #include <orbis/Sysmodule.h>
+#include <orbis/UserService.h>
 #include "graphics.h"
 #include "controller.h"
+
+// Header library for decoding wav files
+#define DR_WAV_IMPLEMENTATION
+#include "dr_wav.h"
 
 #define GRID_SIZE 4
 #define WIN_TILE 2048
@@ -24,28 +30,12 @@
 // Audio defines
 #define AUDIO_CHANNELS 2
 #define AUDIO_SAMPLE_RATE 48000
-#define AUDIO_BUFFER_SIZE 1024
-
-// WAV file header structure
-struct WavHeader {
-    char riff[4];           // "RIFF"
-    uint32_t fileSize;
-    char wave[4];           // "WAVE"
-    char fmt[4];            // "fmt "
-    uint32_t fmtSize;
-    uint16_t audioFormat;
-    uint16_t numChannels;
-    uint32_t sampleRate;
-    uint32_t byteRate;
-    uint16_t blockAlign;
-    uint16_t bitsPerSample;
-    char data[4];           // "data"
-    uint32_t dataSize;
-};
+#define AUDIO_BUFFER_SIZE 256
 
 // Game states
 enum GameState {
     STATE_MENU,
+    STATE_SETTINGS,
     STATE_PLAYING,
     STATE_GAME_OVER
 };
@@ -62,15 +52,39 @@ bool hasWon = false;
 int frameID = 0;
 GameState currentState = STATE_MENU;
 int menuSelection = 0;
+int settingsSelection = 0;
+
+// Input timing for analog stick (15 FPS = ~4 frames per second at 60Hz)
+int analogInputCooldown = 0;
+const int ANALOG_INPUT_DELAY = 15; // Frames to wait between analog inputs (~1 second at 15 FPS)
+const float ANALOG_DEADZONE = 0.5f;
+
+// Touchpad state
+int lastTouchX = -1;
+int lastTouchY = -1;
+bool lastTouchActive = false;
+
+// Save data structure
+struct GameSaveData {
+    uint32_t magic;        // Magic number to verify save file
+    uint32_t version;      // Save version
+    int highScore;         // High score
+    int audioVolume;       // Audio volume (0-100)
+    uint8_t padding[16];   // Reserved for future use
+};
+
+const uint32_t SAVE_MAGIC = 0x32303438; // "2048" in hex
+const uint32_t SAVE_VERSION = 1;
 
 // Audio state
-int audioHandle = -1;
+int32_t audioHandle = -1;
 bool audioInitialized = false;
 bool audioThreadRunning = false;
 pthread_t audioThread;
-int16_t* audioData = nullptr;
-size_t audioDataSize = 0;
-size_t audioCurrentPos = 0;
+drwav_int16* audioData = nullptr;
+size_t audioSampleCount = 0;
+size_t audioCurrentSample = 0;
+int audioVolume = 100; // 0-100%
 
 // Color definitions
 Color bgColor = { 0xFA, 0xF8, 0xEF, 0xFF };
@@ -134,77 +148,41 @@ const uint8_t letterBitmaps[26][7] = {
     {0x1F, 0x02, 0x04, 0x08, 0x1F}  // Z
 };
 
-// Load WAV file
-bool loadWavFile(const char* filename) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        printf("Failed to open WAV file: %s\n", filename);
-        return false;
-    }
-    
-    // Read WAV header
-    WavHeader header;
-    fread(&header, sizeof(WavHeader), 1, file);
-    
-    // Validate WAV file
-    if (memcmp(header.riff, "RIFF", 4) != 0 || memcmp(header.wave, "WAVE", 4) != 0) {
-        printf("Invalid WAV file format\n");
-        fclose(file);
-        return false;
-    }
-    
-    printf("WAV Info: %d Hz, %d channels, %d bits\n", 
-           header.sampleRate, header.numChannels, header.bitsPerSample);
-    
-    // Allocate memory for audio data
-    audioDataSize = header.dataSize;
-    audioData = (int16_t*)malloc(audioDataSize);
-    
-    if (!audioData) {
-        printf("Failed to allocate audio memory\n");
-        fclose(file);
-        return false;
-    }
-    
-    // Read audio data
-    fread(audioData, 1, audioDataSize, file);
-    fclose(file);
-    
-    printf("Loaded %zu bytes of audio data\n", audioDataSize);
-    return true;
-}
-
 // Audio playback thread
 void* audioPlaybackThread(void* arg) {
-    int16_t buffer[AUDIO_BUFFER_SIZE * AUDIO_CHANNELS];
+    drwav_int16* pSample = nullptr;
+    drwav_int16 adjustedBuffer[AUDIO_BUFFER_SIZE * AUDIO_CHANNELS];
     
     while (audioThreadRunning) {
-        if (!audioData || audioDataSize == 0) {
+        if (!audioData || audioSampleCount == 0) {
             sceKernelUsleep(10000); // 10ms
             continue;
         }
         
-        // Fill buffer with audio data
-        size_t samplesNeeded = AUDIO_BUFFER_SIZE * AUDIO_CHANNELS;
-        size_t samplesAvailable = (audioDataSize - audioCurrentPos) / sizeof(int16_t);
+        pSample = &audioData[audioCurrentSample];
         
-        if (samplesAvailable >= samplesNeeded) {
-            // Copy samples to buffer
-            memcpy(buffer, &audioData[audioCurrentPos / sizeof(int16_t)], samplesNeeded * sizeof(int16_t));
-            audioCurrentPos += samplesNeeded * sizeof(int16_t);
-        } else {
-            // Loop back to beginning
-            size_t firstPart = samplesAvailable;
-            size_t secondPart = samplesNeeded - samplesAvailable;
-            
-            memcpy(buffer, &audioData[audioCurrentPos / sizeof(int16_t)], firstPart * sizeof(int16_t));
-            memcpy(&buffer[firstPart], audioData, secondPart * sizeof(int16_t));
-            
-            audioCurrentPos = secondPart * sizeof(int16_t);
+        // Apply volume adjustment
+        for (int i = 0; i < AUDIO_BUFFER_SIZE * AUDIO_CHANNELS; i++) {
+            adjustedBuffer[i] = (drwav_int16)((pSample[i] * audioVolume) / 100);
         }
         
+        // Wait for completion
+        sceAudioOutOutput(audioHandle, NULL);
+        
         // Output audio
-        sceAudioOutOutput(audioHandle, buffer);
+        if (sceAudioOutOutput(audioHandle, adjustedBuffer) < 0) {
+            printf("Failed to output audio\n");
+            sceKernelUsleep(10000);
+            continue;
+        }
+        
+        // Move to next chunk (256 samples * 2 channels)
+        audioCurrentSample += AUDIO_BUFFER_SIZE * 2;
+        
+        // Loop back to beginning
+        if (audioCurrentSample >= audioSampleCount) {
+            audioCurrentSample = 0;
+        }
     }
     
     return nullptr;
@@ -212,43 +190,62 @@ void* audioPlaybackThread(void* arg) {
 
 // Initialize audio system
 bool initAudio() {
-    // Load audio out module
-    int ret = sceSysmoduleLoadModule((OrbisSysModule)ORBIS_SYSMODULE_INTERNAL_AUDIOOUT);
-    if (ret != 0) {
-        printf("Failed to load audio module: 0x%08X\n", ret);
+    int rc;
+    OrbisUserServiceUserId userId = ORBIS_USER_SERVICE_USER_ID_SYSTEM;
+    
+    sceUserServiceInitialize(NULL);
+    
+    // Initialize audio output library
+    rc = sceAudioOutInit();
+    if (rc != 0) {
+        printf("[ERROR] Failed to initialize audio output\n");
         return false;
     }
     
-    // Open audio port
-    audioHandle = sceAudioOutOpen(ORBIS_USER_SERVICE_USER_ID_SYSTEM, 
-                                   ORBIS_AUDIO_OUT_PORT_TYPE_MAIN, 
-                                   0, 
-                                   AUDIO_BUFFER_SIZE, 
-                                   AUDIO_SAMPLE_RATE, 
+    // Open a handle to audio output device
+    audioHandle = sceAudioOutOpen(userId, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN, 0, 
+                                   AUDIO_BUFFER_SIZE, AUDIO_SAMPLE_RATE, 
                                    ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_STEREO);
     
-    if (audioHandle < 0) {
-        printf("Failed to open audio port: 0x%08X\n", audioHandle);
+    if (audioHandle <= 0) {
+        printf("[ERROR] Failed to open audio on main port\n");
         return false;
     }
     
-    // Load WAV file
-    if (!loadWavFile("/app0/assets/audio/bg.wav")) {
-        printf("Failed to load background music\n");
-        sceAudioOutClose(audioHandle);
+    // Decode a wav file to play
+    drwav wav;
+    if (!drwav_init_file(&wav, "/app0/assets/audio/bg.wav", NULL)) {
+        printf("[ERROR] Failed to decode wav file\n");
         return false;
     }
+    
+    printf("[INFO] WAV loaded: %d Hz, %d channels\n", wav.sampleRate, wav.channels);
+    
+    // Calculate the sample count and allocate a buffer
+    audioSampleCount = wav.totalPCMFrameCount * wav.channels;
+    audioData = (drwav_int16*)malloc(audioSampleCount * sizeof(drwav_int16));
+    
+    if (!audioData) {
+        printf("[ERROR] Failed to allocate audio memory\n");
+        drwav_uninit(&wav);
+        return false;
+    }
+    
+    // Decode the wav into audioData
+    drwav_read_pcm_frames_s16(&wav, wav.totalPCMFrameCount, audioData);
+    drwav_uninit(&wav);
+    
+    printf("[INFO] Loaded %zu samples of audio data\n", audioSampleCount);
     
     // Start audio playback thread
     audioThreadRunning = true;
     if (pthread_create(&audioThread, nullptr, audioPlaybackThread, nullptr) != 0) {
-        printf("Failed to create audio thread\n");
+        printf("[ERROR] Failed to create audio thread\n");
         free(audioData);
-        sceAudioOutClose(audioHandle);
         return false;
     }
     
-    printf("Audio initialized successfully\n");
+    printf("[INFO] Audio initialized successfully\n");
     audioInitialized = true;
     return true;
 }
@@ -265,12 +262,79 @@ void closeAudio() {
         audioData = nullptr;
     }
     
-    if (audioHandle >= 0) {
+    if (audioHandle > 0) {
         sceAudioOutClose(audioHandle);
         audioHandle = -1;
     }
     
     audioInitialized = false;
+}
+
+// Save game data
+bool saveGameData() {
+    // Try multiple writable locations
+    const char* savePaths[] = {
+        "/user/home/2048_save.dat",
+        "/mnt/usb0/2048_save.dat",
+        "/data/2048_save.dat"
+    };
+    
+    // Create save data structure
+    GameSaveData saveData;
+    saveData.magic = SAVE_MAGIC;
+    saveData.version = SAVE_VERSION;
+    saveData.highScore = highScore;
+    saveData.audioVolume = audioVolume;
+    memset(saveData.padding, 0, sizeof(saveData.padding));
+    
+    // Try each path until one works
+    for (int i = 0; i < 3; i++) {
+        FILE* file = fopen(savePaths[i], "wb");
+        if (file) {
+            size_t written = fwrite(&saveData, sizeof(GameSaveData), 1, file);
+            fclose(file);
+            
+            if (written == 1) {
+                printf("[INFO] Game data saved successfully to %s\n", savePaths[i]);
+                return true;
+            }
+        }
+    }
+    
+    printf("[ERROR] Failed to save game data to any location\n");
+    return false;
+}
+
+// Load game data
+bool loadGameData() {
+    // Try multiple possible save locations
+    const char* savePaths[] = {
+        "/user/home/2048_save.dat",
+        "/mnt/usb0/2048_save.dat",
+        "/data/2048_save.dat"
+    };
+    
+    for (int i = 0; i < 3; i++) {
+        FILE* file = fopen(savePaths[i], "rb");
+        if (file) {
+            GameSaveData saveData;
+            size_t read = fread(&saveData, sizeof(GameSaveData), 1, file);
+            fclose(file);
+            
+            if (read == 1 && saveData.magic == SAVE_MAGIC) {
+                // Load data
+                highScore = saveData.highScore;
+                audioVolume = saveData.audioVolume;
+                
+                printf("[INFO] Game data loaded successfully from %s\n", savePaths[i]);
+                printf("[INFO] High Score: %d, Volume: %d%%\n", highScore, audioVolume);
+                return true;
+            }
+        }
+    }
+    
+    printf("[INFO] No save data found (first run)\n");
+    return false;
 }
 
 // Draw a single character
@@ -443,12 +507,56 @@ void drawMenu(Scene2D* scene) {
     Color startColor = (menuSelection == 0) ? menuHighlightColor : darkTextColor;
     drawText(scene, "START GAME", 760, 450, startColor, 6);
     
-    drawText(scene, "HIGH SCORE", 740, 600, darkTextColor, 5);
-    drawNumber(scene, highScore, 960, 670, darkTextColor, 5);
+    Color settingsColor = (menuSelection == 1) ? menuHighlightColor : darkTextColor;
+    drawText(scene, "SETTINGS", 820, 550, settingsColor, 6);
     
-    drawText(scene, "CREATED BY SKIDGFX", 620, 900, darkTextColor, 4);
+    drawText(scene, "HIGH SCORE", 740, 700, darkTextColor, 5);
+    drawNumber(scene, highScore, 960, 770, darkTextColor, 5);
     
-    drawText(scene, "X START  SQUARE QUIT", 680, 1000, darkTextColor, 3);
+    // "CREATED BY SKIDGFX" - 18 chars * 6 * 4 = 432 pixels wide, center at 960 = start at 744
+    drawText(scene, "CREATED BY SKIDGFX", 744, 950, darkTextColor, 4);
+    
+    // "X SELECT  UP DOWN NAVIGATE  SQUARE QUIT" - 40 chars * 6 * 3 = 720 pixels wide, center at 960 = start at 600
+    drawText(scene, "X SELECT  UP DOWN NAVIGATE  SQUARE QUIT", 600, 1030, darkTextColor, 3);
+}
+
+// Draw settings menu
+void drawSettings(Scene2D* scene) {
+    scene->FrameBufferFill(bgColor);
+    
+    drawText(scene, "SETTINGS", 820, 150, darkTextColor, 8);
+    
+    // Volume setting
+    Color volumeColor = (settingsSelection == 0) ? menuHighlightColor : darkTextColor;
+    drawText(scene, "VOLUME", 700, 350, volumeColor, 6);
+    
+    // Volume bar
+    int barX = 600;
+    int barY = 450;
+    int barWidth = 720;
+    int barHeight = 40;
+    
+    // Draw background bar
+    scene->DrawRectangle(barX, barY, barWidth, barHeight, emptyTileColor);
+    
+    // Draw filled portion
+    int fillWidth = (barWidth * audioVolume) / 100;
+    if (fillWidth > 0) {
+        scene->DrawRectangle(barX, barY, fillWidth, barHeight, menuHighlightColor);
+    }
+    
+    // Draw volume percentage
+    char volBuf[16];
+    snprintf(volBuf, sizeof(volBuf), "%d", audioVolume);
+    drawText(scene, volBuf, 1350, 455, darkTextColor, 5);
+    drawText(scene, "%", 1450, 455, darkTextColor, 5);
+    
+    // Back option
+    Color backColor = (settingsSelection == 1) ? menuHighlightColor : darkTextColor;
+    drawText(scene, "BACK", 880, 650, backColor, 6);
+    
+    // "X SELECT  UP DOWN NAVIGATE  LEFT RIGHT ADJUST" - 46 chars * 6 * 3 = 828 pixels, center at 960 = start at 546
+    drawText(scene, "X SELECT  UP DOWN NAVIGATE  LEFT RIGHT ADJUST", 546, 1030, darkTextColor, 3);
 }
 
 // Draw game over screen
@@ -469,9 +577,12 @@ void drawGameOver(Scene2D* scene) {
         drawText(scene, "GAME OVER", 750, 700, tile32Color, 7);
     }
     
-    drawText(scene, "TRIANGLE OR CIRCLE TO MENU", 520, 850, darkTextColor, 4);
-    drawText(scene, "OPTIONS TO RESTART", 630, 920, darkTextColor, 4);
-    drawText(scene, "X TO MENU", 800, 990, darkTextColor, 4);
+    // "TRIANGLE OR CIRCLE TO MENU" - 27 chars * 6 * 4 = 648 pixels, center at 960 = start at 636
+    drawText(scene, "TRIANGLE OR CIRCLE TO MENU", 636, 850, darkTextColor, 4);
+    // "OPTIONS TO RESTART" - 18 chars * 6 * 4 = 432 pixels, center at 960 = start at 744
+    drawText(scene, "OPTIONS TO RESTART", 744, 920, darkTextColor, 4);
+    // "X TO MENU" - 9 chars * 6 * 4 = 216 pixels, center at 960 = start at 852
+    drawText(scene, "X TO MENU", 852, 990, darkTextColor, 4);
 }
 
 // Draw the entire game
@@ -488,7 +599,8 @@ void drawGame(Scene2D* scene) {
         }
     }
     
-    drawText(scene, "DPAD MOVE  OPTIONS RESTART  X MENU", 460, 950, darkTextColor, 3);
+    // "DPAD ANALOG SWIPE  OPTIONS RESTART  X MENU" - 43 chars * 6 * 3 = 774 pixels, center at 960 = start at 573
+    drawText(scene, "DPAD ANALOG SWIPE  OPTIONS RESTART  X MENU", 573, 950, darkTextColor, 3);
 }
 
 // Slide and merge tiles in one direction (left)
@@ -592,6 +704,10 @@ int main() {
         printf("Warning: Failed to initialize audio, continuing without sound\n");
     }
     
+    // Load save data
+    printf("Loading save data\n");
+    loadGameData();
+    
     printf("Starting game\n");
     
     bool running = true;
@@ -610,12 +726,29 @@ int main() {
         if (currentState == STATE_MENU) {
             drawMenu(scene);
             
+            bool upPressed = controller->DpadUpPressed();
+            if (upPressed && !lastUpPressed) {
+                menuSelection = (menuSelection - 1 + 2) % 2;
+            }
+            lastUpPressed = upPressed;
+            
+            bool downPressed = controller->DpadDownPressed();
+            if (downPressed && !lastDownPressed) {
+                menuSelection = (menuSelection + 1) % 2;
+            }
+            lastDownPressed = downPressed;
+            
             bool xPressed = controller->XPressed();
             if (xPressed && !lastXPressed) {
-                currentState = STATE_PLAYING;
-                initGrid();
-                addRandomTile();
-                addRandomTile();
+                if (menuSelection == 0) {
+                    currentState = STATE_PLAYING;
+                    initGrid();
+                    addRandomTile();
+                    addRandomTile();
+                } else if (menuSelection == 1) {
+                    currentState = STATE_SETTINGS;
+                    settingsSelection = 0;
+                }
             }
             lastXPressed = xPressed;
             
@@ -625,11 +758,59 @@ int main() {
             }
             lastSquarePressed = squarePressed;
             
+        } else if (currentState == STATE_SETTINGS) {
+            drawSettings(scene);
+            
+            bool upPressed = controller->DpadUpPressed();
+            if (upPressed && !lastUpPressed) {
+                settingsSelection = (settingsSelection - 1 + 2) % 2;
+            }
+            lastUpPressed = upPressed;
+            
+            bool downPressed = controller->DpadDownPressed();
+            if (downPressed && !lastDownPressed) {
+                settingsSelection = (settingsSelection + 1) % 2;
+            }
+            lastDownPressed = downPressed;
+            
+            bool leftPressed = controller->DpadLeftPressed();
+            if (leftPressed && !lastLeftPressed && settingsSelection == 0) {
+                audioVolume = (audioVolume - 5 < 0) ? 0 : audioVolume - 5;
+            }
+            lastLeftPressed = leftPressed;
+            
+            bool rightPressed = controller->DpadRightPressed();
+            if (rightPressed && !lastRightPressed && settingsSelection == 0) {
+                audioVolume = (audioVolume + 5 > 100) ? 100 : audioVolume + 5;
+            }
+            lastRightPressed = rightPressed;
+            
+            bool xPressed = controller->XPressed();
+            if (xPressed && !lastXPressed) {
+                if (settingsSelection == 1) {
+                    currentState = STATE_MENU;
+                    menuSelection = 0;
+                    // Save settings when exiting settings menu
+                    saveGameData();
+                }
+            }
+            lastXPressed = xPressed;
+            
+            bool circlePressed = controller->CirclePressed();
+            if (circlePressed && !lastCirclePressed) {
+                currentState = STATE_MENU;
+                menuSelection = 0;
+                // Save settings when exiting settings menu
+                saveGameData();
+            }
+            lastCirclePressed = circlePressed;
+            
         } else if (currentState == STATE_PLAYING) {
             drawGame(scene);
             
             bool moved = false;
             
+            // Handle D-Pad input
             bool upPressed = controller->DpadUpPressed();
             if (upPressed && !lastUpPressed && !gameOver) {
                 moved = moveUp();
@@ -654,6 +835,71 @@ int main() {
             }
             lastRightPressed = rightPressed;
             
+            // Handle Left Analog Stick input with deadzone and cooldown
+            if (analogInputCooldown == 0 && !gameOver) {
+                float stickX = controller->GetLeftStickX();
+                float stickY = controller->GetLeftStickY();
+                
+                if (fabsf(stickY) > ANALOG_DEADZONE && fabsf(stickY) > fabsf(stickX)) {
+                    if (stickY < 0) { // Up
+                        moved = moveUp();
+                        analogInputCooldown = ANALOG_INPUT_DELAY;
+                    } else { // Down
+                        moved = moveDown();
+                        analogInputCooldown = ANALOG_INPUT_DELAY;
+                    }
+                } else if (fabsf(stickX) > ANALOG_DEADZONE) {
+                    if (stickX < 0) { // Left
+                        moved = moveLeft();
+                        analogInputCooldown = ANALOG_INPUT_DELAY;
+                    } else { // Right
+                        moved = moveRight();
+                        analogInputCooldown = ANALOG_INPUT_DELAY;
+                    }
+                }
+            }
+            
+            // Handle Touchpad swipe gestures
+            if (controller->IsTouchpadTouched() && !gameOver) {
+                int touchX = controller->GetTouchpadX();
+                int touchY = controller->GetTouchpadY();
+                
+                if (lastTouchActive && touchX >= 0 && touchY >= 0) {
+                    int deltaX = touchX - lastTouchX;
+                    int deltaY = touchY - lastTouchY;
+                    
+                    // Require minimum swipe distance (100 pixels)
+                    if (abs(deltaX) > 100 || abs(deltaY) > 100) {
+                        if (abs(deltaY) > abs(deltaX)) {
+                            if (deltaY < 0) { // Swipe Up
+                                moved = moveUp();
+                            } else { // Swipe Down
+                                moved = moveDown();
+                            }
+                        } else {
+                            if (deltaX < 0) { // Swipe Left
+                                moved = moveLeft();
+                            } else { // Swipe Right
+                                moved = moveRight();
+                            }
+                        }
+                        // Reset touch tracking after gesture
+                        lastTouchActive = false;
+                    }
+                }
+                
+                lastTouchX = touchX;
+                lastTouchY = touchY;
+                lastTouchActive = true;
+            } else {
+                lastTouchActive = false;
+            }
+            
+            // Decrease analog cooldown
+            if (analogInputCooldown > 0) {
+                analogInputCooldown--;
+            }
+            
             bool optionsPressed = controller->StartPressed();
             if (optionsPressed && !lastOptionsPressed) {
                 initGrid();
@@ -677,6 +923,8 @@ int main() {
                     gameOver = true;
                     if (score > highScore) {
                         highScore = score;
+                        // Save new high score immediately
+                        saveGameData();
                     }
                     currentState = STATE_GAME_OVER;
                 }

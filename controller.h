@@ -30,8 +30,20 @@ public:
     bool DpadLeftPressed();
     bool TouchpadPressed();
     
+    // Analog stick methods
+    float GetLeftStickX();
+    float GetLeftStickY();
+    float GetRightStickX();
+    float GetRightStickY();
+    
+    // Touchpad methods
+    int GetTouchpadX();
+    int GetTouchpadY();
+    bool IsTouchpadTouched();
+    
 private:
     void setButtonState(int state);
+    float normalizeStickValue(uint8_t value);
     
     int userID;
     int pad;
