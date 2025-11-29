@@ -59,10 +59,15 @@ del /s /q /f $(IntDir)\*.oelf</NMakeCleanCommandLine>
   <ItemDefinitionGroup>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="App.cpp" />
+    <ClCompile Include="Audio.cpp" />
     <ClCompile Include="controller.cpp" />
     <ClCompile Include="graphics.cpp" />
-    <ClCompile Include="main.cpp" />
+    <ClCompile Include="Input.cpp" />
     <ClCompile Include="build.bat" />
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="Renderer.cpp" />
+    <ClCompile Include="SaveData.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="sce_sys\icon0.png" />
@@ -73,15 +78,21 @@ del /s /q /f $(IntDir)\*.oelf</NMakeCleanCommandLine>
     <None Include="assets\images\.gitkeep" />
     <None Include="assets\misc\.gitkeep" />
     <None Include="assets\videos\.gitkeep" />
+    <None Include="REFACTORING.md" />
     <None Include="sce_module\libc.prx" />
     <None Include="sce_module\libSceFios2.prx" />
     <None Include="sce_sys\about\right.sprx" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="App.h" />
+    <ClInclude Include="Audio.h" />
     <ClInclude Include="controller.h" />
     <ClInclude Include="dr_wav.h" />
     <ClInclude Include="graphics.h" />
+    <ClInclude Include="Input.h" />
     <ClInclude Include="log.h" />
+    <ClInclude Include="Renderer.h" />
+    <ClInclude Include="SaveData.h" />
   </ItemGroup>
   <ItemGroup>
     <Media Include="assets\audio\bg.wav" />

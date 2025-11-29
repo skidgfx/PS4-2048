@@ -2,7 +2,7 @@ SETLOCAL EnableDelayedExpansion
 
 Rem Package information
 set PKG_TITLE="2048 Game"
-set PKG_VERSION="1.00"
+set PKG_VERSION="1.01"
 set PKG_ASSETS="assets"
 set PKG_TITLE_ID="SKID02048"
 set PKG_CONTENT_ID="IV0000-SKID02048_00-GAME204800000000"
